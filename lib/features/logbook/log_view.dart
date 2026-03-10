@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import 'package:connectivity_plus/connectivity_plus.dart';
@@ -5,7 +6,6 @@ import 'models/log_model.dart';
 import 'package:logbook_app_001/features/logbook/log_controller.dart';
 import 'package:logbook_app_001/features/auth/login_view.dart';
 import 'package:logbook_app_001/features/logbook/log_editor_page.dart';
-import 'dart:async';
 
 class LogView extends StatefulWidget {
   final dynamic currentUser;
@@ -23,8 +23,6 @@ class _LogViewState extends State<LogView> {
 
   late StreamSubscription<List<ConnectivityResult>> _connectivitySubscription;
   final TextEditingController _searchController = TextEditingController();
-  final TextEditingController _titleController = TextEditingController();
-  final TextEditingController _descController = TextEditingController();
 
   @override
   void initState() {
@@ -37,7 +35,6 @@ class _LogViewState extends State<LogView> {
 
     _checkConnection();
 
-    // TASK 4: Background Sync Listener
     _connectivitySubscription = Connectivity().onConnectivityChanged.listen((results) {
       final isOfflineNow = results.contains(ConnectivityResult.none);
       
@@ -45,12 +42,9 @@ class _LogViewState extends State<LogView> {
         _isOffline = isOfflineNow;
       });
 
-      // Jika status berubah dari offline menjadi ONLINE
       if (!isOfflineNow) {
-        // Picu sinkronisasi latar belakang
         controller.syncPendingLogs(widget.currentUser['teamId']);
         
-        // Berikan feedback visual ke pengguna
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(
@@ -184,16 +178,58 @@ class _LogViewState extends State<LogView> {
 
           Padding(
             padding: const EdgeInsets.fromLTRB(12, 12, 12, 4),
-            child: TextField(
-              controller: _searchController,
-              onChanged: (value) => controller.searchLog(value),
-              decoration: InputDecoration(
-                hintText: "Cari berdasarkan judul...",
-                prefixIcon: const Icon(Icons.search),
-                border: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(12),
+            child: Row(
+              children: [
+                Expanded(
+                  child: TextField(
+                    controller: _searchController,
+                    onChanged: (value) => controller.searchLog(value),
+                    decoration: InputDecoration(
+                      hintText: "Cari berdasarkan judul...",
+                      prefixIcon: const Icon(Icons.search),
+                      border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      contentPadding: const EdgeInsets.symmetric(vertical: 0),
+                    ),
+                  ),
                 ),
-              ),
+                const SizedBox(width: 8),
+                ValueListenableBuilder<LogCategory?>(
+                  valueListenable: controller.selectedCategoryFilter,
+                  builder: (context, selectedCategory, _) {
+                    return Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 12),
+                      decoration: BoxDecoration(
+                        border: Border.all(color: Colors.grey),
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      child: DropdownButtonHideUnderline(
+                        child: DropdownButton<LogCategory?>(
+                          value: selectedCategory,
+                          hint: const Text("Semua"),
+                          icon: const Icon(Icons.filter_list),
+                          items: [
+                            const DropdownMenuItem(
+                              value: null,
+                              child: Text("Semua"),
+                            ),
+                            ...LogCategory.values.map((category) {
+                              return DropdownMenuItem(
+                                value: category,
+                                child: Text(getCategoryName(category)),
+                              );
+                            }),
+                          ],
+                          onChanged: (value) {
+                            controller.filterByCategory(value);
+                          },
+                        ),
+                      ),
+                    );
+                  },
+                ),
+              ],
             ),
           ),
 
@@ -202,7 +238,30 @@ class _LogViewState extends State<LogView> {
               valueListenable: controller.filteredLogs,
               builder: (context, logs, _) {
                 if (logs.isEmpty) {
-                  return const Center(child: Text("Tidak ada data"));
+                  return Center(
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        const Icon(
+                          Icons.note_alt_outlined,
+                          size: 64,
+                          color: Colors.grey,
+                        ),
+                        const SizedBox(height: 16),
+                        const Text(
+                          "Belum ada catatan.\nMulai catat kemajuan proyek Anda!",
+                          textAlign: TextAlign.center,
+                          style: TextStyle(color: Colors.grey, fontSize: 16),
+                        ),
+                        const SizedBox(height: 16),
+                        ElevatedButton.icon(
+                          onPressed: () => _goToEditor(),
+                          icon: const Icon(Icons.add),
+                          label: const Text("Buat Catatan Pertama"),
+                        ),
+                      ],
+                    ),
+                  );
                 }
 
                 return ListView.builder(
@@ -210,62 +269,90 @@ class _LogViewState extends State<LogView> {
                   itemCount: logs.length,
                   itemBuilder: (context, index) {
                     final log = logs[index];
-
-                    final bool isOwner =
-                        log.authorId == widget.currentUser['uid'];
+                    final bool isOwner = log.authorId == widget.currentUser['uid'];
+                    final Color cardColor = categoryColors[log.category] ?? Colors.grey;
 
                     return Card(
                       margin: const EdgeInsets.only(bottom: 12),
-                      child: ListTile(
-                        leading: Icon(
-                          log.id != null
-                              ? Icons.cloud_done
-                              : Icons.cloud_upload_outlined,
-                          color:
-                              log.id != null ? Colors.green : Colors.orange,
+                      clipBehavior: Clip.antiAlias,
+                      child: Container(
+                        decoration: BoxDecoration(
+                          border: Border(
+                            left: BorderSide(color: cardColor, width: 6),
+                          ),
                         ),
-                        title: Text(log.title),
-                        subtitle: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(log.description),
-                            const SizedBox(height: 4),
-                            Text(
-                              formatTimestamp(log.date),
-                              style: const TextStyle(
-                                fontSize: 12,
-                                color: Colors.black54,
+                        child: ListTile(
+                          leading: Icon(
+                            log.id != null
+                                ? Icons.cloud_done
+                                : Icons.cloud_upload_outlined,
+                            color: log.id != null ? Colors.green : Colors.orange,
+                          ),
+                          title: Text(log.title),
+                          subtitle: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                log.description,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
                               ),
-                            ),
-                          ],
-                        ),
-                         trailing: Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            // Indikator visual apakah log ini publik atau privat
-                            if (log.isPublic) 
-                              const Icon(Icons.public, size: 16, color: Colors.grey),
-                            if (!log.isPublic) 
-                              const Icon(Icons.lock, size: 16, color: Colors.grey),
-                            const SizedBox(width: 8),
-                            
-                            // TASK 5: Kedaulatan Mutlak - HANYA OWNER YANG BISA EDIT/DELETE
-                            if (isOwner)
-                              IconButton(
-                                icon: const Icon(Icons.edit, color: Colors.blue),
-                                onPressed: () => _goToEditor(log: log, index: index),
+                              const SizedBox(height: 4),
+                              Row(
+                                children: [
+                                  Container(
+                                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                                    decoration: BoxDecoration(
+                                      color: cardColor.withOpacity(0.2),
+                                      borderRadius: BorderRadius.circular(4),
+                                    ),
+                                    child: Text(
+                                      getCategoryName(log.category),
+                                      style: TextStyle(
+                                        fontSize: 10,
+                                        color: cardColor.withOpacity(0.8),
+                                        fontWeight: FontWeight.bold,
+                                      ),
+                                    ),
+                                  ),
+                                  const SizedBox(width: 8),
+                                  Text(
+                                    formatTimestamp(log.date),
+                                    style: const TextStyle(
+                                      fontSize: 12,
+                                      color: Colors.black54,
+                                    ),
+                                  ),
+                                ],
                               ),
-                            if (isOwner)
-                              IconButton(
-                                icon: const Icon(Icons.delete, color: Colors.red),
-                                onPressed: () async {
-                                  final ok = await _confirmDelete(log);
-                                  if (ok == true) {
-                                    await controller.removeLog(index);
-                                  }
-                                },
+                            ],
+                          ),
+                          trailing: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Icon(
+                                log.isPublic ? Icons.public : Icons.lock,
+                                size: 16,
+                                color: Colors.grey,
                               ),
-                          ],
+                              const SizedBox(width: 8),
+                              if (isOwner)
+                                IconButton(
+                                  icon: const Icon(Icons.edit, color: Colors.blue),
+                                  onPressed: () => _goToEditor(log: log, index: index),
+                                ),
+                              if (isOwner)
+                                IconButton(
+                                  icon: const Icon(Icons.delete, color: Colors.red),
+                                  onPressed: () async {
+                                    final ok = await _confirmDelete(log);
+                                    if (ok == true) {
+                                      await controller.removeLog(index);
+                                    }
+                                  },
+                                ),
+                            ],
+                          ),
                         ),
                       ),
                     );
@@ -287,8 +374,6 @@ class _LogViewState extends State<LogView> {
   void dispose() {
     _connectivitySubscription.cancel();
     _searchController.dispose();
-    _titleController.dispose();
-    _descController.dispose();
     super.dispose();
   }
 }
