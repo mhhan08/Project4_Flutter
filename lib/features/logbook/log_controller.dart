@@ -1,22 +1,36 @@
-import 'dart:convert';
 import 'package:flutter/material.dart';
-import 'package:shared_preferences/shared_preferences.dart';
-import 'package:mongo_dart/mongo_dart.dart';
+import 'package:mongo_dart/mongo_dart.dart' hide Box;
+import 'package:hive/hive.dart';
 import 'models/log_model.dart';
-import 'package:logbook_app_001/services/mongo_service.dart';
-import 'package:logbook_app_001/helpers/log_helper.dart';
+import '../../services/mongo_service.dart';
+import '../../helpers/log_helper.dart';
+import '../../services/access_control_service.dart';
 
 class LogController {
-  final ValueNotifier<List<LogModel>> logsNotifier = ValueNotifier<List<LogModel>>([]);
-  final ValueNotifier<List<LogModel>> filteredLogs = ValueNotifier<List<LogModel>>([]);
-  final ValueNotifier<bool> isLoading = ValueNotifier(false);
-  final ValueNotifier<LogCategory?> selectedCategoryFilter = ValueNotifier(null);
 
-  static const String _storageKey = 'user_logs_cache';
+  final ValueNotifier<List<LogModel>> logsNotifier =
+      ValueNotifier<List<LogModel>>([]);
+
+  final ValueNotifier<List<LogModel>> filteredLogs =
+      ValueNotifier<List<LogModel>>([]);
+
+  final ValueNotifier<bool> isLoading = ValueNotifier(false);
+
+  final ValueNotifier<LogCategory?> selectedCategoryFilter =
+      ValueNotifier(null);
+
   String _lastSearchQuery = "";
 
-  LogController() {
-    loadFromDisk();
+  late Box<LogModel> _myBox;
+
+  late String userRole;
+  late String userId;
+
+  Future<void> init(String role, String uid) async {
+    userRole = role;
+    userId = uid;
+
+    _myBox = await Hive.openBox<LogModel>('log_cache');
   }
 
   void searchLog(String query) {
@@ -32,121 +46,185 @@ class LogController {
   void _applyFilters() {
     List<LogModel> result = logsNotifier.value;
 
+    // Filter Visibilitas
+    result = result.where((log) => log.authorId == userId || log.isPublic).toList();
+
     if (_lastSearchQuery.isNotEmpty) {
-      result = result.where((log) => log.title.toLowerCase().contains(_lastSearchQuery.toLowerCase())).toList();
+      result = result
+          .where((log) => log.title
+              .toLowerCase()
+              .contains(_lastSearchQuery.toLowerCase()))
+          .toList();
     }
 
     if (selectedCategoryFilter.value != null) {
-      result = result.where((log) => log.category == selectedCategoryFilter.value).toList();
+      result = result
+          .where((log) => log.category == selectedCategoryFilter.value)
+          .toList();
     }
 
     filteredLogs.value = result;
   }
 
-  Future<void> loadFromDisk() async {
+  Future<void> loadLogs(String teamId) async {
     isLoading.value = true;
+
     try {
-      final cloudData = await MongoService().getLogs();
+      logsNotifier.value = _myBox.values.toList();
+      _applyFilters();
+
+      final cloudData = await MongoService().getLogs(teamId);
+
+      await _myBox.clear();
+      await _myBox.addAll(cloudData);
+
       logsNotifier.value = cloudData;
       _applyFilters();
-      await saveToCache();
-      
+
       await LogHelper.writeLog(
-        "INFO: Cloud data loaded successfully",
-        source: "log_controller",
-        level: 3,
+        "SYNC: Data retrieved from Atlas",
+        level: 2,
       );
     } catch (e) {
-      print("Error loading data: $e");
-      await _loadFromCache();
-    } finally {
-      isLoading.value = false;
+      await LogHelper.writeLog(
+        "OFFLINE: Using local cache data",
+        level: 2,
+      );
     }
+
+    isLoading.value = false;
   }
 
-  Future<void> addLog(String title, String desc, LogCategory category) async {
+  Future<void> addLog(
+    String title,
+    String desc,
+    LogCategory category,
+    String authorId,
+    String teamId,
+    bool isPublic, 
+  ) async {
     final newLog = LogModel(
-      id: ObjectId(),
+      id: ObjectId().oid,
       title: title,
       description: desc,
       category: category,
       date: DateTime.now().toIso8601String(),
+      authorId: authorId,
+      teamId: teamId,
+      isPublic: isPublic, 
     );
+
+    await _myBox.add(newLog);
+
+    logsNotifier.value = [...logsNotifier.value, newLog];
+    _applyFilters();
 
     try {
       await MongoService().insertLog(newLog);
-      logsNotifier.value = [...logsNotifier.value, newLog];
-      _applyFilters();
-      await saveToCache();
+
+      await LogHelper.writeLog(
+        "SUCCESS: Data synced to cloud",
+        source: "log_controller.dart",
+      );
     } catch (e) {
-      print("Error adding log: $e");
+      await LogHelper.writeLog(
+        "WARNING: Data saved locally, will sync when online",
+        level: 1,
+      );
     }
   }
 
-  Future<void> editLog(LogModel oldLog, String title, String desc, LogCategory category) async {
-    if (oldLog.id == null) return;
-
+  Future<void> editLog(
+    LogModel oldLog,
+    String title,
+    String desc,
+    LogCategory category,
+    bool isPublic, 
+  ) async {
     final updatedLog = LogModel(
       id: oldLog.id,
       title: title,
       description: desc,
       category: category,
       date: oldLog.date,
+      authorId: oldLog.authorId,
+      teamId: oldLog.teamId,
+      isPublic: isPublic, 
     );
+
+    final list = List<LogModel>.from(logsNotifier.value);
+    final index =
+        list.indexWhere((e) => e.id == oldLog.id);
+
+    if (index != -1) {
+      list[index] = updatedLog;
+      logsNotifier.value = list;
+      _applyFilters();
+
+      await _myBox.putAt(index, updatedLog);
+    }
 
     try {
       await MongoService().updateLog(updatedLog);
-
-      final list = List<LogModel>.from(logsNotifier.value);
-      final index = list.indexWhere((e) => e.id?.toHexString() == oldLog.id?.toHexString());
-      
-      if (index != -1) {
-        list[index] = updatedLog;
-        logsNotifier.value = list;
-        _applyFilters();
-        await saveToCache();
-      }
     } catch (e) {
-      print("Error updating log: $e");
+      await LogHelper.writeLog(
+        "WARNING: Edit only saved locally",
+        level: 1,
+      );
     }
   }
 
-  Future<void> removeLog(LogModel log) async {
-    if (log.id == null) return;
+  Future<void> removeLog(int index) async {
 
-    final oldLogs = List<LogModel>.from(logsNotifier.value);
+    final target = logsNotifier.value[index];
 
-    logsNotifier.value = logsNotifier.value
-        .where((e) => e.id?.toHexString() != log.id?.toHexString())
-        .toList();
+    if (!AccessControlService.canPerform(
+        userRole,
+        AccessControlService.actionDelete,
+        isOwner: target.authorId == userId)) {
+
+      await LogHelper.writeLog(
+        "SECURITY BREACH: Unauthorized delete attempt",
+        level: 1,
+      );
+
+      return;
+    }
+
+    await _myBox.deleteAt(index);
+
+    final list = List<LogModel>.from(logsNotifier.value);
+    list.removeAt(index);
+
+    logsNotifier.value = list;
     _applyFilters();
 
     try {
-      await MongoService().deleteLog(log.id!);
-      await saveToCache();
+      if (target.id != null) {
+        await MongoService().deleteLog(target.id!);
+      }
     } catch (e) {
-      print("Error removing log, rolling back state: $e");
-      logsNotifier.value = oldLogs;
-      _applyFilters();
+      await LogHelper.writeLog(
+        "WARNING: Failed to delete in cloud",
+        level: 1,
+      );
     }
   }
 
-  Future<void> saveToCache() async {
-    final prefs = await SharedPreferences.getInstance();
-    final encoded = jsonEncode(
-      logsNotifier.value.map((e) => e.toMap()).toList(),
-    );
-    await prefs.setString(_storageKey, encoded);
-  }
+  Future<void> syncPendingLogs(String teamId) async {
+    final localLogs = _myBox.values.toList();
 
-  Future<void> _loadFromCache() async {
-    final prefs = await SharedPreferences.getInstance();
-    final data = prefs.getString(_storageKey);
-    if (data != null) {
-      final List decoded = jsonDecode(data);
-      final cachedLogs = decoded.map((e) => LogModel.fromMap(e)).toList();
-      logsNotifier.value = cachedLogs;
-      _applyFilters();
+    for (var log in localLogs) {
+      try {
+        await MongoService().updateLog(log);
+      } catch (e) {
+        await LogHelper.writeLog(
+          "SYNC ERROR: Gagal sinkronisasi data ${log.title}",
+          level: 1,
+        );
+      }
     }
+
+    await loadLogs(teamId);
   }
 }
